@@ -18,7 +18,7 @@ on:
       threads:
         description: 'Number of Threads'
         required: true
-        default: '100'
+        default: '350'
 
 jobs:
   run:
